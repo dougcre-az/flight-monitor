@@ -6,7 +6,27 @@ from fastapi import Depends, FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.config import get_settings, suggest_hubs
-from app.db import init_db
+from app.models import (
+    BucketAnalysis, BucketRequest, CabinClass, CompareRequest,
+    CompareResult, ErrorResponse, HealthResponse, SearchRequest,
+    SearchResponse,
+)
+from services.compare import CompareEngine
+from services.duffel import DuffelClient, DuffelError, get_duffel_client
+
+logging.basicConfig(
+    level=logging.INFO,
+    for
+cd ~/Coding/flight-monitor
+cat > app/main.py << 'PYEOF'
+from __future__ import annotations
+import logging
+from contextlib import asynccontextmanager
+from typing import Optional
+from fastapi import Depends, FastAPI, HTTPException, Query, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from app.config import get_settings, suggest_hubs
 from app.models import (
     BucketAnalysis, BucketRequest, CabinClass, CompareRequest,
     CompareResult, ErrorResponse, HealthResponse, SearchRequest,
@@ -26,32 +46,20 @@ log = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Init DB
-    init_db()
+    try:
+        from app.db import init_db
+        init_db()
+        log.info("Database initialized")
+    except Exception as e:
+        log.warning("DB init skipped: %s", e)
 
     # Start Duffel client
     client = get_duffel_client()
     await client.start()
     log.info("Duffel client started")
 
-    # Start scheduler — runs daily at 8am UTC
-    from apscheduler.schedulers.asyncio import AsyncIOScheduler
-    from services.scheduler import run_daily_check
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(
-        run_daily_check,
-        trigger="cron",
-        hour=8,
-        minute=0,
-        kwargs={"duffel_client": client},
-        id="daily_check",
-        replace_existing=True,
-    )
-    scheduler.start()
-    log.info("Scheduler started — daily check at 08:00 UTC")
-
     yield
 
-    scheduler.shutdown()
     await client.stop()
     log.info("Shutdown complete")
 
@@ -82,10 +90,7 @@ def get_engine(duffel: DuffelClient = Depends(get_duffel_client)) -> CompareEngi
 
 def require_duffel(duffel: DuffelClient = Depends(get_duffel_client)) -> DuffelClient:
     if not settings.duffel_configured:
-        raise HTTPException(
-            status_code = 503,
-            detail      = "Duffel API key not configured.",
-        )
+        raise HTTPException(status_code=503, detail="Duffel API key not configured.")
     return duffel
 
 
@@ -118,8 +123,11 @@ async def health(duffel: DuffelClient = Depends(get_duffel_client)) -> HealthRes
 
 
 @app.post("/run", tags=["meta"])
-async def manual_run(background_tasks: BackgroundTasks, duffel: DuffelClient = Depends(require_duffel)):
-    """Manually trigger the daily price check — useful for testing."""
+async def manual_run(
+    background_tasks: BackgroundTasks,
+    duffel: DuffelClient = Depends(require_duffel),
+):
+    """Manually trigger the daily price check."""
     from services.scheduler import run_daily_check
     background_tasks.add_task(run_daily_check, duffel)
     return {"status": "started", "message": "Daily check running in background — check Sheets in ~2 minutes"}
